@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { sendChatMessage as apiSendChat } from '../api';
 import {
   Send, Bot, User, Cpu, BrainCircuit, Database,
   Zap, ShieldCheck, Loader, ChevronDown, Sparkles
@@ -96,20 +97,36 @@ export function AgentChat() {
     }]);
   };
 
-  const sendMessage = () => {
+  const sendMessage = async () => {
     if (!input.trim()) return;
     const userMsg = input.trim();
     setMessages(prev => [...prev, { sender: 'user', text: userMsg }]);
     setInput('');
     setIsTyping(true);
 
-    // Simulate agent thinking
-    const delay = 1000 + Math.random() * 1500;
-    setTimeout(() => {
-      const response = generateResponse(selectedAgent.id, userMsg);
-      setMessages(prev => [...prev, { sender: 'agent', text: response, agentId: selectedAgent.id }]);
+    // Try backend first, fall back to client-side
+    const agentKeyMap = {
+      'orchestrator': 'nexus_orchestrator',
+      'intel': 'nexus_orchestrator',
+      'retrieval': 'data_fetcher',
+      'executor': 'action_executor',
+      'verifier': 'shield_verifier',
+    };
+    const backendAgent = agentKeyMap[selectedAgent.id] || null;
+    const backendResponse = await apiSendChat(userMsg, backendAgent);
+
+    if (backendResponse && backendResponse.content) {
+      setMessages(prev => [...prev, { sender: 'agent', text: backendResponse.content, agentId: selectedAgent.id }]);
       setIsTyping(false);
-    }, delay);
+    } else {
+      // Fallback to client-side responses
+      const delay = 800 + Math.random() * 1000;
+      setTimeout(() => {
+        const response = generateResponse(selectedAgent.id, userMsg);
+        setMessages(prev => [...prev, { sender: 'agent', text: response, agentId: selectedAgent.id }]);
+        setIsTyping(false);
+      }, delay);
+    }
   };
 
   const c = colorClasses[selectedAgent.color];

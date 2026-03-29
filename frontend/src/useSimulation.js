@@ -1,101 +1,132 @@
-import { useState, useEffect } from 'react';
-import { mockData as initialData } from './mockData';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { mockData as fallbackData } from './mockData';
+import {
+  fetchMetrics,
+  fetchAgentStatuses,
+  fetchWorkflows,
+  fetchGlobalAudit,
+  connectWebSocket,
+} from './api';
 
-const randomInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
-
-const sampleTasks = [
-  "Parsing incoming procurement request",
-  "Validating SOC2 compliance certificates",
-  "Extracting decisions from Zoom transcript",
-  "Drafting vendor clarification email",
-  "Routing approval to Finance Director",
-  "Updating Salesforce Opportunity Stage",
-  "Awaiting API response from Workday",
-  "Self-correcting missing OCR field"
-];
-
-const sampleLogs = [
-  { type: 'info', agent: 'System Engine', message: 'Scaling up worker nodes to handle queue spike.' },
-  { type: 'event', agent: 'MeetIntel Core', message: 'Successfully generated action items for Engineering sync.' },
-  { type: 'action', agent: 'Action Exec Alpha', message: 'Executed database update for 14 employee records.' },
-  { type: 'warning', agent: 'Shield Verifier', message: 'Detected anomaly in invoice amount. Flagging for review.' },
-  { type: 'escalation', agent: 'Nexus Orchestrator', message: 'Human approval required: Vendor exceeds budget threshold.' }
-];
-
+/**
+ * useSimulation — hybrid data hook.
+ *
+ * 1. Tries to fetch live data from the backend every 3s.
+ * 2. Listens on a global WebSocket for real-time events
+ *    (workflow steps, audit logs, etc.).
+ * 3. Falls back to the original mock data if the backend
+ *    is unreachable.
+ */
 export function useSimulation() {
-  const [data, setData] = useState(initialData);
+  const [data, setData] = useState(fallbackData);
+  const [backendOnline, setBackendOnline] = useState(false);
+  const wsRef = useRef(null);
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setData(prevData => {
-        const newData = { ...prevData };
-        
-        // 1. Increment Metrics
-        newData.systemMetrics = {
-          ...prevData.systemMetrics,
-          tasksAutomated: prevData.systemMetrics.tasksAutomated + randomInt(1, 4)
-        };
+  // ---- Poll backend for dashboard data ----------------------------
+  const poll = useCallback(async () => {
+    const [metrics, agents, workflows, audit] = await Promise.all([
+      fetchMetrics(),
+      fetchAgentStatuses(),
+      fetchWorkflows(),
+      fetchGlobalAudit(50),
+    ]);
 
-        // 2. Simulate Agent Activity
-        newData.agents = prevData.agents.map(agent => {
-          // 20% chance an agent changes state
-          if (Math.random() < 0.2) {
-            const statuses = ['idle', 'active', 'processing', 'self-correcting'];
-            const newStatus = statuses[randomInt(0, statuses.length - 1)];
-            return {
-              ...agent,
-              status: newStatus,
-              currentTask: newStatus === 'idle' ? 'Awaiting next query' : sampleTasks[randomInt(0, sampleTasks.length - 1)]
-            };
-          }
-          return agent;
-        });
+    // If any call returned data the backend is alive
+    if (metrics || agents) {
+      setBackendOnline(true);
 
-        // 3. Advance Workflows
-        newData.workflows = prevData.workflows.map(wf => {
-          if (wf.status === 'in-progress' || wf.status === 'warning') {
-            // 30% chance to progress
-            if (Math.random() < 0.3) {
-              const boost = randomInt(5, 15);
-              const newProgress = Math.min(wf.progress + boost, 100);
-              
-              const update = { ...wf, progress: newProgress };
-              if (newProgress === 100) {
-                update.status = 'completed';
-                update.health = 100;
-              } else if (newProgress > 60 && newProgress < 80) {
-                // Occasionally dip health
-                update.health = randomInt(70, 95);
-              }
-              return update;
-            }
-          }
-          return wf;
-        });
+      setData(prev => ({
+        ...prev,
+        systemMetrics: metrics ? {
+          activeWorkflows: metrics.active_workflows ?? prev.systemMetrics.activeWorkflows,
+          tasksAutomated: metrics.tasks_automated ?? prev.systemMetrics.tasksAutomated,
+          humanEscalations: metrics.human_escalations ?? prev.systemMetrics.humanEscalations,
+          selfCorrections: metrics.self_corrections ?? prev.systemMetrics.selfCorrections,
+          uptime: metrics.uptime ?? prev.systemMetrics.uptime,
+          autonomyRate: metrics.autonomy_rate ?? prev.systemMetrics.autonomyRate,
+        } : prev.systemMetrics,
 
-        // 4. Add Audit Logs Occasionally
-        if (Math.random() < 0.15) {
-            const newLogProto = sampleLogs[randomInt(0, sampleLogs.length - 1)];
-            const now = new Date();
-            const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-            
-            const newLog = {
-                id: `log-sim-${Date.now()}`,
-                time: timeStr,
-                type: newLogProto.type,
-                agent: newLogProto.agent,
-                message: newLogProto.message
-            };
-            
-            newData.auditLogs = [newLog, ...prevData.auditLogs].slice(0, 50); // Keep last 50
-        }
+        agents: agents ? agents.map(a => ({
+          id: a.id,
+          name: a.name,
+          role: a.role,
+          status: a.status,
+          successRate: a.success_rate,
+          currentTask: a.current_task,
+          avatar: a.avatar,
+        })) : prev.agents,
 
-        return newData;
-      });
-    }, 2500); // 2.5 seconds tick
+        workflows: workflows && workflows.length > 0 ? workflows.map(wf => ({
+          id: wf.id,
+          type: wf.type,
+          name: wf.name,
+          status: wf.status === 'running' ? 'in-progress' : wf.status,
+          health: wf.health,
+          progress: wf.progress,
+          steps: wf.steps.map(s => ({
+            id: s.id,
+            name: s.name,
+            agent: s.agent,
+            status: s.status,
+            time: s.time || '-',
+            detail: s.detail || null,
+          })),
+        })) : prev.workflows,
 
-    return () => clearInterval(interval);
+        auditLogs: audit && audit.length > 0 ? audit.map(a => {
+          const ts = new Date(a.timestamp);
+          return {
+            id: a.id,
+            time: `${ts.getHours().toString().padStart(2,'0')}:${ts.getMinutes().toString().padStart(2,'0')}:${ts.getSeconds().toString().padStart(2,'0')}`,
+            type: a.event.includes('FAILURE') ? 'warning' :
+                  a.event.includes('ESCALAT') ? 'escalation' :
+                  a.event.includes('STEP') ? 'action' : 'info',
+            agent: a.agent.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+            message: a.payload?.message || a.event,
+          };
+        }) : prev.auditLogs,
+      }));
+    }
   }, []);
+
+  // Polling interval
+  useEffect(() => {
+    poll();                             // initial fetch
+    const id = setInterval(poll, 3000); // every 3s
+    return () => clearInterval(id);
+  }, [poll]);
+
+  // ---- WebSocket for live events ----------------------------------
+  useEffect(() => {
+    const ws = connectWebSocket((event) => {
+      // Push new event into audit logs
+      const ts = new Date(event.timestamp || Date.now());
+      const timeStr = `${ts.getHours().toString().padStart(2,'0')}:${ts.getMinutes().toString().padStart(2,'0')}:${ts.getSeconds().toString().padStart(2,'0')}`;
+
+      const newLog = {
+        id: event.id || `ws-${Date.now()}`,
+        time: timeStr,
+        type: event.type?.includes('FAILURE') ? 'warning' :
+              event.type?.includes('ESCALAT') ? 'escalation' :
+              event.type?.includes('STEP') ? 'action' : 'event',
+        agent: (event.agent || 'system').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+        message: event.message || event.type,
+      };
+
+      setData(prev => ({
+        ...prev,
+        auditLogs: [newLog, ...prev.auditLogs].slice(0, 50),
+      }));
+
+      // Trigger an immediate data refresh on major events
+      if (event.type?.includes('WORKFLOW_STEP') || event.type?.includes('WORKFLOW_COMPLETED')) {
+        poll();
+      }
+    });
+
+    wsRef.current = ws;
+    return () => ws.close();
+  }, [poll]);
 
   return data;
 }

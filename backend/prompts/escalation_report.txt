@@ -1,0 +1,2 @@
+Summarize why the task is risky, what dependency it is blocking, and which manager action would help unblock it fastest.
+Keep the report crisp enough to drop into Slack without further editing.
